@@ -114,6 +114,7 @@ func (rf *Raft) becomeCandidateLocked() {
 	rf.currentTerm++
 	rf.role = Candidate
 	rf.votedFor = rf.me
+	rf.resetElectionTimeLocked()
 }
 
 func (rf *Raft) becomeLeaderLocked() {
@@ -132,6 +133,10 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (PartA).
+	rf.mu.Lock()
+	term = rf.currentTerm
+	isleader = rf.role == Leader
+	rf.mu.Unlock()
 	return term, isleader
 }
 
