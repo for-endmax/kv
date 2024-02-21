@@ -80,6 +80,12 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 
+	// fields for applying loop
+	applyCh     chan ApplyMsg
+	applyCond   *sync.Cond
+	commitIndex int
+	lastApplied int
+
 	electionStart   time.Time
 	electionTimeout time.Duration // random
 }
@@ -255,11 +261,17 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 
+	//initialize the fields used for apply
+	rf.applyCh = applyCh
+	rf.applyCond = sync.NewCond(&rf.mu)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.electionTicker()
+
+	// start ticker goroutine to start application
+	go rf.applicationTicker()
 
 	return rf
 }
