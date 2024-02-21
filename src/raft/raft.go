@@ -76,6 +76,10 @@ type Raft struct {
 	currentTerm int
 	votedFor    int // -1 means vote for none
 
+	log        []LogEntry
+	nextIndex  []int
+	matchIndex []int
+
 	electionStart   time.Time
 	electionTimeout time.Duration // random
 }
@@ -112,6 +116,12 @@ func (rf *Raft) becomeLeaderLocked() {
 	}
 	LOG(rf.me, rf.currentTerm, DLeader, "Become Leader in T%d", rf.currentTerm)
 	rf.role = Leader
+
+	// initial next/match index for this term
+	for peer := 0; peer < len(rf.peers); peer++ {
+		rf.nextIndex[peer] = len(rf.log)
+		rf.matchIndex[peer] = 0
+	}
 }
 
 // return currentTerm and whether this server
@@ -173,14 +183,6 @@ func (rf *Raft) readPersist(data []byte) {
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (PartD).
 
-}
-
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-type RequestVoteArgs struct {
-	// Your data here (PartA, PartB).
-	Term        int
-	CandidateId int
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -248,6 +250,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.role = Follower
 	rf.currentTerm = 0
 	rf.votedFor = -1
+
+	rf.log = append(rf.log, LogEntry{})
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
