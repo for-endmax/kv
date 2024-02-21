@@ -86,6 +86,7 @@ func (rf *Raft) getMajorityIndexLocked() int {
 	return tmpIndexes[majorityIdx]
 }
 
+// only valid in the given term
 func (rf *Raft) startReplication(term int) bool {
 	replicateToPeer := func(peer int, args *AppendEntriesArgs) {
 		reply := &AppendEntriesReply{}
@@ -97,9 +98,16 @@ func (rf *Raft) startReplication(term int) bool {
 			LOG(rf.me, rf.currentTerm, DLog, "-> S%d, Lost or error", peer)
 			return
 		}
+
 		// align terms
 		if reply.Term > rf.currentTerm {
 			rf.becomeFollowerLocked(reply.Term)
+			return
+		}
+
+		// whether context lost
+		if rf.contextLostLocked(Leader, args.Term) {
+			LOG(rf.me, rf.currentTerm, DLog, "-> S%d, Context lost, T%d:Leader->T%d:%s", peer, args.Term, rf.currentTerm, rf.role)
 			return
 		}
 
@@ -112,7 +120,7 @@ func (rf *Raft) startReplication(term int) bool {
 				idx--
 			}
 			rf.nextIndex[peer] = idx + 1
-			LOG(rf.me, rf.currentTerm, DLog, "Log not matched in %d, Update next=%d", args.PrevLogIndex, rf.nextIndex[peer])
+			LOG(rf.me, rf.currentTerm, DLog, "-> S%d,Log not matched in %d, Update next=%d", peer, args.PrevLogIndex, rf.nextIndex[peer])
 			return
 		}
 

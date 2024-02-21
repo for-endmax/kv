@@ -29,7 +29,7 @@ import (
 const (
 	electionTimeoutMin  time.Duration = 250 * time.Millisecond
 	electionTimeoutMax  time.Duration = 400 * time.Millisecond
-	replicationInterval time.Duration = 200 * time.Millisecond
+	replicationInterval time.Duration = 70 * time.Millisecond
 )
 
 type Role string
@@ -204,13 +204,20 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	// Your code here (PartB).
+	if rf.role != Leader {
+		return 0, 0, false
+	}
+	rf.log = append(rf.log, LogEntry{
+		CommandValid: true,
+		Command:      command,
+		Term:         rf.currentTerm,
+	})
+	LOG(rf.me, rf.currentTerm, DLeader, "Leader accept log [%d]T%d", len(rf.log)-1, rf.currentTerm)
 
-	return index, term, isLeader
+	return len(rf.log) - 1, rf.currentTerm, true
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,

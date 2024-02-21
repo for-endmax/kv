@@ -71,7 +71,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// check log
 	if rf.isMoreUpToDateLocked(args.LastLogIndex, args.LastLogTerm) {
-		LOG(rf.me, rf.currentTerm, DVote, "-> S%d, Reject Vote, S%d's log less up-to-date", args.CandidateId)
+		LOG(rf.me, rf.currentTerm, DVote, "-> S%d, Reject Vote, S%d's log less up-to-date", args.CandidateId, args.CandidateId)
 		return
 	}
 
@@ -161,8 +161,8 @@ func (rf *Raft) startElection(term int) {
 		args := &RequestVoteArgs{
 			Term:         rf.currentTerm,
 			CandidateId:  rf.me,
-			LastLogTerm:  l - 1,
-			LastLogIndex: rf.log[l-1].Term,
+			LastLogIndex: l - 1,
+			LastLogTerm:  rf.log[l-1].Term,
 		}
 		go askVoteFromPeer(peer, args)
 	}
