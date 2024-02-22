@@ -25,6 +25,10 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+
+	//fields for optimization logs replication
+	ConflictTerm  int
+	ConflictIndex int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -44,18 +48,28 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// args.Term >= rf.currentTerm
 	rf.becomeFollowerLocked(args.Term)
 
+	// initialize electionTimer whether we accept logs
+	defer rf.resetElectionTimerLocked()
+
 	// return failure if the previous log not matched
-	if args.PrevLogIndex >= len(rf.log) {
+	if args.PrevLogIndex >= len(rf.log) { // local logs is too short
+		reply.ConflictTerm = InvalidTerm
+		reply.ConflictIndex = len(rf.log)
+
 		LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Reject Log, Follower log too short, Len:%d <= Prev:%d", args.LeaderId, len(rf.log), args.PrevLogIndex)
 		return
 	}
 	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+		reply.ConflictIndex = rf.firstLogFor(reply.ConflictTerm)
+
 		LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Reject Log, Prev log not match, [%d]: T%d != T%d", args.LeaderId, args.PrevLogIndex, rf.log[args.PrevLogIndex].Term, args.PrevLogTerm)
 		return
 	}
 
 	// match success,append the leader logs to local
 	rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
+	rf.persistLocked()
 	LOG(rf.me, rf.currentTerm, DLog2, "Follower append logs: (%d, %d]", args.PrevLogIndex, args.PrevLogIndex+len(args.Entries))
 	reply.Success = true
 
@@ -69,7 +83,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.applyCond.Signal()
 	}
 
-	rf.resetElectionTimeLocked()
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -84,6 +97,12 @@ func (rf *Raft) getMajorityIndexLocked() int {
 	majorityIdx := (len(rf.peers) - 1) / 2
 	LOG(rf.me, rf.currentTerm, DDebug, "Match index after sort: %v, majority[%d]=%d", tmpIndexes, majorityIdx, tmpIndexes[majorityIdx])
 	return tmpIndexes[majorityIdx]
+}
+func MinInt(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // only valid in the given term
@@ -113,13 +132,20 @@ func (rf *Raft) startReplication(term int) bool {
 
 		// success is false, probe
 		if !reply.Success {
-			idx := args.PrevLogIndex - 1
-			term := rf.log[idx].Term
-			// find previous term
-			for idx > 0 && rf.log[idx].Term == term {
-				idx--
+			prevNext := rf.nextIndex[peer]
+			if reply.ConflictTerm == InvalidTerm {
+				rf.nextIndex[peer] = reply.ConflictIndex
+			} else {
+				//TODO maybe lastLogFor
+				firstTermIndex := rf.firstLogFor(reply.ConflictTerm)
+				if firstTermIndex != InvalidIndex {
+					rf.nextIndex[peer] = firstTermIndex + 1
+				} else {
+					rf.nextIndex[peer] = reply.ConflictIndex
+				}
 			}
-			rf.nextIndex[peer] = idx + 1
+			// avoid the late reply move the nextIndex forward again
+			rf.nextIndex[peer] = MinInt(prevNext, rf.nextIndex[peer])
 			LOG(rf.me, rf.currentTerm, DLog, "-> S%d,Log not matched in %d, Update next=%d", peer, args.PrevLogIndex, rf.nextIndex[peer])
 			return
 		}

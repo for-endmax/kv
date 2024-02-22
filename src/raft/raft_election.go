@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func (rf *Raft) resetElectionTimeLocked() {
+func (rf *Raft) resetElectionTimerLocked() {
 	rf.electionStart = time.Now()
 	randRange := int64(electionTimeoutMax - electionTimeoutMin)
 	rf.electionTimeout = electionTimeoutMin + time.Duration(rand.Int63()%randRange)
@@ -77,7 +77,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	reply.VotedGranted = true
 	rf.votedFor = args.CandidateId
-	rf.resetElectionTimeLocked()
+	rf.persistLocked()
+	rf.resetElectionTimerLocked()
 	LOG(rf.me, rf.currentTerm, DVote, "-> S%d, Vote granted", args.CandidateId)
 }
 
