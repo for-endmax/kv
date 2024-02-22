@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"fmt"
 	"sort"
 	"time"
 )
@@ -9,6 +10,21 @@ type LogEntry struct {
 	Term         int
 	CommandValid bool
 	Command      interface{}
+}
+
+func (rf *Raft) logString() string {
+	var terms string
+	prevTerm := rf.log[0].Term
+	prevStart := 0
+	for i := 0; i < len(rf.log); i++ {
+		if rf.log[i].Term != prevStart {
+			terms += fmt.Sprintf(" [%d,%d]T%d", prevStart, i-1, prevTerm)
+			prevStart = i
+			prevTerm = rf.log[i].Term
+		}
+	}
+	terms += fmt.Sprintf("[%d,%d]T%d", prevStart, len(rf.log)-1, prevTerm)
+	return terms
 }
 
 type AppendEntriesArgs struct {
@@ -22,6 +38,11 @@ type AppendEntriesArgs struct {
 	LeaderCommit int
 }
 
+func (args *AppendEntriesArgs) String() string {
+	return fmt.Sprintf("Leader: %d,T%d,Prev: [%d]T%d, Log: (%d,%d],CommitIdx: %d",
+		args.LeaderId, args.Term, args.PrevLogIndex, args.PrevLogTerm, args.PrevLogIndex, args.PrevLogIndex+len(args.Entries), args.LeaderCommit)
+}
+
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
@@ -31,11 +52,15 @@ type AppendEntriesReply struct {
 	ConflictIndex int
 }
 
+func (reply *AppendEntriesReply) String() string {
+	return fmt.Sprintf("T%d, Success: %v, ConflictTerm: %d, ConflictIndex: %d ", reply.Term, reply.Success, reply.ConflictTerm, reply.ConflictIndex)
+}
+
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	// For debug
-	LOG(rf.me, rf.currentTerm, DDebug, "<- S%d, Receive log, Prev=[%d]T%d, Len()=%d", args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, len(args.Entries))
+	LOG(rf.me, rf.currentTerm, DDebug, "<- S%d, Receive log, Args:%s", args.LeaderId, args.String())
 
 	reply.Term = rf.currentTerm
 	reply.Success = false
@@ -49,7 +74,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.becomeFollowerLocked(args.Term)
 
 	// initialize electionTimer whether we accept logs
-	defer rf.resetElectionTimerLocked()
+	defer func() {
+		rf.resetElectionTimerLocked()
+		if !reply.Success {
+			LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Follower Conflict: [%d]T%d", args.LeaderId, reply.ConflictIndex, reply.ConflictTerm)
+			LOG(rf.me, rf.currentTerm, DDebug, "<- S%d, Follower Log=%v", args.LeaderId, rf.logString())
+		}
+	}()
 
 	// return failure if the previous log not matched
 	if args.PrevLogIndex >= len(rf.log) { // local logs is too short
@@ -117,6 +148,7 @@ func (rf *Raft) startReplication(term int) bool {
 			LOG(rf.me, rf.currentTerm, DLog, "-> S%d, Lost or error", peer)
 			return
 		}
+		LOG(rf.me, rf.currentTerm, DDebug, "-> S%d, Replicate log, Reply: %s", peer, reply.String())
 
 		// align terms
 		if reply.Term > rf.currentTerm {
@@ -146,7 +178,9 @@ func (rf *Raft) startReplication(term int) bool {
 			}
 			// avoid the late reply move the nextIndex forward again
 			rf.nextIndex[peer] = MinInt(prevNext, rf.nextIndex[peer])
-			LOG(rf.me, rf.currentTerm, DLog, "-> S%d,Log not matched in %d, Update next=%d", peer, args.PrevLogIndex, rf.nextIndex[peer])
+			LOG(rf.me, rf.currentTerm, DLog, "-> S%d,Log not matched in Prev [%d]T%d, Update next Prev=[%d]T%d",
+				peer, args.PrevLogIndex, args.PrevLogTerm, rf.nextIndex[peer]-1, rf.log[rf.nextIndex[peer]-1].Term)
+			LOG(rf.me, rf.currentTerm, DDebug, "-> S%d, Leader Log=%v", peer, rf.logString())
 			return
 		}
 
@@ -155,7 +189,7 @@ func (rf *Raft) startReplication(term int) bool {
 		rf.nextIndex[peer] = rf.matchIndex[peer] + 1
 
 		majorityMatched := rf.getMajorityIndexLocked()
-		if majorityMatched > rf.commitIndex {
+		if majorityMatched > rf.commitIndex && rf.log[majorityMatched].Term == rf.currentTerm { // important! can only commit log of current term
 			LOG(rf.me, rf.currentTerm, DApply, "Leader update the commit index %d->%d", rf.commitIndex, majorityMatched)
 			rf.commitIndex = majorityMatched
 			rf.applyCond.Signal()
@@ -184,7 +218,7 @@ func (rf *Raft) startReplication(term int) bool {
 			Entries:      rf.log[prevIdx+1:],
 			LeaderCommit: rf.commitIndex,
 		}
-		LOG(rf.me, rf.currentTerm, DDebug, "-> S%d, Send log, Prev=[%d]T%d, Len()=%d", peer, args.PrevLogIndex, args.PrevLogTerm, len(args.Entries))
+		LOG(rf.me, rf.currentTerm, DDebug, "-> S%d, Send log, Args:%s", peer, args.String())
 		go replicateToPeer(peer, args)
 	}
 	return true

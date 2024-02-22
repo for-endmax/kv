@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"fmt"
 	"math/rand"
 	"time"
 )
@@ -38,6 +39,10 @@ type RequestVoteArgs struct {
 	LastLogTerm  int
 }
 
+func (args *RequestVoteArgs) String() string {
+	return fmt.Sprintf("Candidate-%d, T%d, Last=[%d]T%d", args.CandidateId, args.Term, args.LastLogIndex, args.LastLogTerm)
+}
+
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
@@ -46,11 +51,17 @@ type RequestVoteReply struct {
 	VotedGranted bool
 }
 
+func (reply *RequestVoteReply) String() string {
+	return fmt.Sprintf("T%d, VoteGranted=%v", reply.Term, reply.VotedGranted)
+}
+
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (PartA, PartB).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	LOG(rf.me, rf.currentTerm, DDebug, "<- S%d, VotedAsked Args=%v", args.CandidateId, args.String())
+
 	reply.Term = rf.currentTerm
 	reply.VotedGranted = false
 
@@ -127,6 +138,7 @@ func (rf *Raft) startElection(term int) {
 			LOG(rf.me, rf.currentTerm, DDebug, "Ask vote from S%d, Lost or error", peer)
 			return
 		}
+		LOG(rf.me, rf.currentTerm, DDebug, "-> S%d, AskVote Reply=%v", peer, reply.String())
 
 		// align terms
 		if reply.Term > rf.currentTerm {
@@ -165,6 +177,7 @@ func (rf *Raft) startElection(term int) {
 			LastLogIndex: l - 1,
 			LastLogTerm:  rf.log[l-1].Term,
 		}
+		LOG(rf.me, rf.currentTerm, DDebug, "-> S%d, AskVote Args=%v", peer, args.String())
 		go askVoteFromPeer(peer, args)
 	}
 }
