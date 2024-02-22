@@ -136,6 +136,29 @@ func MinInt(a int, b int) int {
 	return b
 }
 
+func (rf *Raft) firstLogFor(term int) int {
+	for idx, entry := range rf.log {
+		if entry.Term == term {
+			return idx
+		} else if entry.Term > term {
+			break
+		}
+	}
+	return InvalidIndex
+}
+
+func (rf *Raft) lastLogFor(term int) int {
+	lastIndex := InvalidIndex
+	for idx, entry := range rf.log {
+		if entry.Term == term {
+			lastIndex = idx
+		} else if entry.Term > term {
+			break
+		}
+	}
+	return lastIndex
+}
+
 // only valid in the given term
 func (rf *Raft) startReplication(term int) bool {
 	replicateToPeer := func(peer int, args *AppendEntriesArgs) {
@@ -168,16 +191,20 @@ func (rf *Raft) startReplication(term int) bool {
 			if reply.ConflictTerm == InvalidTerm {
 				rf.nextIndex[peer] = reply.ConflictIndex
 			} else {
-				//TODO maybe lastLogFor
-				firstTermIndex := rf.firstLogFor(reply.ConflictTerm)
-				if firstTermIndex != InvalidIndex {
-					rf.nextIndex[peer] = firstTermIndex + 1
+				lastTermIndex := rf.lastLogFor(reply.ConflictTerm)
+				if lastTermIndex != InvalidIndex {
+					rf.nextIndex[peer] = lastTermIndex + 1
 				} else {
 					rf.nextIndex[peer] = reply.ConflictIndex
 				}
 			}
-			// avoid the late reply move the nextIndex forward again
-			rf.nextIndex[peer] = MinInt(prevNext, rf.nextIndex[peer])
+			rf.nextIndex[peer] = MinInt(prevNext, rf.nextIndex[peer]-1)
+
+			// some of the replications are delayed, Leader may receive the same reply several times
+			// in this situation , nextIndex[peer] may reduce to 0
+			if rf.nextIndex[peer] == 0 {
+				rf.nextIndex[peer] = 1
+			}
 			LOG(rf.me, rf.currentTerm, DLog, "-> S%d,Log not matched in Prev [%d]T%d, Update next Prev=[%d]T%d",
 				peer, args.PrevLogIndex, args.PrevLogTerm, rf.nextIndex[peer]-1, rf.log[rf.nextIndex[peer]-1].Term)
 			LOG(rf.me, rf.currentTerm, DDebug, "-> S%d, Leader Log=%v", peer, rf.logString())
