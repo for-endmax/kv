@@ -26,46 +26,6 @@ import (
 	"course/labrpc"
 )
 
-const (
-	electionTimeoutMin  time.Duration = 250 * time.Millisecond
-	electionTimeoutMax  time.Duration = 400 * time.Millisecond
-	replicationInterval time.Duration = 70 * time.Millisecond
-)
-
-const (
-	InvalidTerm  = 0
-	InvalidIndex = 0
-)
-
-type Role string
-
-const (
-	Follower  Role = "Follower"
-	Candidate Role = "Candidate"
-	Leader    Role = "Leader"
-)
-
-// as each Raft peer becomes aware that successive log entries are
-// committed, the peer should send an ApplyMsg to the service (or
-// tester) on the same server, via the applyCh passed to Make(). set
-// CommandValid to true to indicate that the ApplyMsg contains a newly
-// committed log entry.
-//
-// in part PartD you'll want to send other kinds of messages (e.g.,
-// snapshots) on the applyCh, but set CommandValid to false for these
-// other uses.
-type ApplyMsg struct {
-	CommandValid bool
-	Command      interface{}
-	CommandIndex int
-
-	// For PartD:
-	SnapshotValid bool
-	Snapshot      []byte
-	SnapshotTerm  int
-	SnapshotIndex int
-}
-
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -93,54 +53,6 @@ type Raft struct {
 
 	electionStart   time.Time
 	electionTimeout time.Duration // random
-}
-
-func (rf *Raft) becomeFollowerLocked(term int) {
-	if term < rf.currentTerm {
-		LOG(rf.me, rf.currentTerm, DError, "Can't become Follower, lower term: T%d", term)
-		return
-	}
-	LOG(rf.me, rf.currentTerm, DLog, "%s->Follower, For T%d->T%d", rf.role, rf.currentTerm, term)
-
-	shouldPersist := term != rf.currentTerm
-	rf.role = Follower
-	if term > rf.currentTerm {
-		rf.votedFor = -1
-	}
-	rf.currentTerm = term
-
-	// only term changed need persist
-	if shouldPersist {
-		rf.persistLocked()
-	}
-}
-
-func (rf *Raft) becomeCandidateLocked() {
-	if rf.role == Leader {
-		LOG(rf.me, rf.currentTerm, DVote, "Leader can't become Candidate")
-		return
-	}
-	LOG(rf.me, rf.currentTerm, DVote, "%s->Candidate, For T%d", rf.role, rf.currentTerm+1)
-	rf.currentTerm++
-	rf.role = Candidate
-	rf.votedFor = rf.me
-	rf.persistLocked()
-	rf.resetElectionTimerLocked()
-}
-
-func (rf *Raft) becomeLeaderLocked() {
-	if rf.role != Candidate {
-		LOG(rf.me, rf.currentTerm, DError, "Only Candidate can become Leader")
-		return
-	}
-	LOG(rf.me, rf.currentTerm, DLeader, "Become Leader in T%d", rf.currentTerm)
-	rf.role = Leader
-
-	// initial next/match index for this term
-	for peer := 0; peer < len(rf.peers); peer++ {
-		rf.nextIndex[peer] = rf.log.size()
-		rf.matchIndex[peer] = 0
-	}
 }
 
 // return currentTerm and whether this server
@@ -219,10 +131,6 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) contextLostLocked(role Role, term int) bool {
-	return !(rf.currentTerm == term && rf.role == role)
-}
-
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -262,4 +170,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.applicationTicker()
 
 	return rf
+}
+
+func (rf *Raft) contextLostLocked(role Role, term int) bool {
+	return !(rf.currentTerm == term && rf.role == role)
 }

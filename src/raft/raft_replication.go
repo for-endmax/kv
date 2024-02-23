@@ -6,6 +6,13 @@ import (
 	"time"
 )
 
+const (
+	InvalidTerm  = 0
+	InvalidIndex = 0
+
+	replicationInterval time.Duration = 70 * time.Millisecond
+)
+
 type LogEntry struct {
 	Term         int
 	CommandValid bool
