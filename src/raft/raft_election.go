@@ -18,8 +18,7 @@ func (rf *Raft) isElectionTimeoutLocked() bool {
 
 // check whether my last log is more up-to-date than candidate's last log
 func (rf *Raft) isMoreUpToDateLocked(candidateIndex, candidateTerm int) bool {
-	l := len(rf.log)
-	lastTerm, lastIndex := rf.log[l-1].Term, l-1
+	lastIndex, lastTerm := rf.log.last()
 	LOG(rf.me, rf.currentTerm, DVote, "Compare last log, Me: [%d]T%d, Candidate: [%d]T%d", lastIndex, lastTerm, candidateIndex, candidateTerm)
 
 	if lastTerm != candidateTerm {
@@ -165,7 +164,7 @@ func (rf *Raft) startElection(term int) {
 		LOG(rf.me, rf.currentTerm, DVote, "Lost Candidate to %s, abort RequestVote", rf.role)
 		return
 	}
-	l := len(rf.log)
+	lastIdx, lastTerm := rf.log.last()
 	for peer := 0; peer < len(rf.peers); peer++ {
 		if peer == rf.me {
 			votes++
@@ -174,8 +173,8 @@ func (rf *Raft) startElection(term int) {
 		args := &RequestVoteArgs{
 			Term:         rf.currentTerm,
 			CandidateId:  rf.me,
-			LastLogIndex: l - 1,
-			LastLogTerm:  rf.log[l-1].Term,
+			LastLogIndex: lastIdx,
+			LastLogTerm:  lastTerm,
 		}
 		LOG(rf.me, rf.currentTerm, DDebug, "-> S%d, AskVote Args=%v", peer, args.String())
 		go askVoteFromPeer(peer, args)

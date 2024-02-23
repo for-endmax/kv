@@ -12,21 +12,6 @@ type LogEntry struct {
 	Command      interface{}
 }
 
-func (rf *Raft) logString() string {
-	var terms string
-	prevTerm := rf.log[0].Term
-	prevStart := 0
-	for i := 0; i < len(rf.log); i++ {
-		if rf.log[i].Term != prevStart {
-			terms += fmt.Sprintf(" [%d,%d]T%d", prevStart, i-1, prevTerm)
-			prevStart = i
-			prevTerm = rf.log[i].Term
-		}
-	}
-	terms += fmt.Sprintf("[%d,%d]T%d", prevStart, len(rf.log)-1, prevTerm)
-	return terms
-}
-
 type AppendEntriesArgs struct {
 	Term     int
 	LeaderId int
@@ -78,28 +63,28 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.resetElectionTimerLocked()
 		if !reply.Success {
 			LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Follower Conflict: [%d]T%d", args.LeaderId, reply.ConflictIndex, reply.ConflictTerm)
-			LOG(rf.me, rf.currentTerm, DDebug, "<- S%d, Follower Log=%v", args.LeaderId, rf.logString())
+			LOG(rf.me, rf.currentTerm, DDebug, "<- S%d, Follower Log=%v", args.LeaderId, rf.log.String())
 		}
 	}()
 
 	// return failure if the previous log not matched
-	if args.PrevLogIndex >= len(rf.log) { // local logs is too short
+	if args.PrevLogIndex >= rf.log.size() { // local logs is too short
 		reply.ConflictTerm = InvalidTerm
-		reply.ConflictIndex = len(rf.log)
+		reply.ConflictIndex = rf.log.size()
 
-		LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Reject Log, Follower log too short, Len:%d <= Prev:%d", args.LeaderId, len(rf.log), args.PrevLogIndex)
+		LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Reject Log, Follower log too short, Len:%d <= Prev:%d", args.LeaderId, rf.log.size(), args.PrevLogIndex)
 		return
 	}
-	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
-		reply.ConflictIndex = rf.firstLogFor(reply.ConflictTerm)
+	if rf.log.at(args.PrevLogIndex).Term != args.PrevLogTerm {
+		reply.ConflictTerm = rf.log.at(args.PrevLogIndex).Term
+		reply.ConflictIndex = rf.log.firstFor(reply.ConflictTerm)
 
-		LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Reject Log, Prev log not match, [%d]: T%d != T%d", args.LeaderId, args.PrevLogIndex, rf.log[args.PrevLogIndex].Term, args.PrevLogTerm)
+		LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Reject Log, Prev log not match, [%d]: T%d != T%d", args.LeaderId, args.PrevLogIndex, rf.log.at(args.PrevLogIndex).Term, args.PrevLogTerm)
 		return
 	}
 
 	// match success,append the leader logs to local
-	rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
+	rf.log.appendFrom(args.PrevLogIndex, args.Entries)
 	rf.persistLocked()
 	LOG(rf.me, rf.currentTerm, DLog2, "Follower append logs: (%d, %d]", args.PrevLogIndex, args.PrevLogIndex+len(args.Entries))
 	reply.Success = true
@@ -108,8 +93,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.LeaderCommit > rf.commitIndex {
 		LOG(rf.me, rf.currentTerm, DApply, "Follower update the commit index %d->%d", rf.commitIndex, args.LeaderCommit)
 		rf.commitIndex = args.LeaderCommit
-		if rf.commitIndex >= len(rf.log) {
-			rf.commitIndex = len(rf.log) - 1
+		if rf.commitIndex >= rf.log.size() {
+			rf.commitIndex = rf.log.size() - 1
 		}
 		rf.applyCond.Signal()
 	}
@@ -134,29 +119,6 @@ func MinInt(a int, b int) int {
 		return a
 	}
 	return b
-}
-
-func (rf *Raft) firstLogFor(term int) int {
-	for idx, entry := range rf.log {
-		if entry.Term == term {
-			return idx
-		} else if entry.Term > term {
-			break
-		}
-	}
-	return InvalidIndex
-}
-
-func (rf *Raft) lastLogFor(term int) int {
-	lastIndex := InvalidIndex
-	for idx, entry := range rf.log {
-		if entry.Term == term {
-			lastIndex = idx
-		} else if entry.Term > term {
-			break
-		}
-	}
-	return lastIndex
 }
 
 // only valid in the given term
@@ -191,7 +153,7 @@ func (rf *Raft) startReplication(term int) bool {
 			if reply.ConflictTerm == InvalidTerm {
 				rf.nextIndex[peer] = reply.ConflictIndex
 			} else {
-				lastTermIndex := rf.lastLogFor(reply.ConflictTerm)
+				lastTermIndex := rf.log.lastFor(reply.ConflictTerm)
 				if lastTermIndex != InvalidIndex {
 					rf.nextIndex[peer] = lastTermIndex + 1
 				} else {
@@ -206,8 +168,8 @@ func (rf *Raft) startReplication(term int) bool {
 				rf.nextIndex[peer] = 1
 			}
 			LOG(rf.me, rf.currentTerm, DLog, "-> S%d,Log not matched in Prev [%d]T%d, Update next Prev=[%d]T%d",
-				peer, args.PrevLogIndex, args.PrevLogTerm, rf.nextIndex[peer]-1, rf.log[rf.nextIndex[peer]-1].Term)
-			LOG(rf.me, rf.currentTerm, DDebug, "-> S%d, Leader Log=%v", peer, rf.logString())
+				peer, args.PrevLogIndex, args.PrevLogTerm, rf.nextIndex[peer]-1, rf.log.at(rf.nextIndex[peer]-1).Term)
+			LOG(rf.me, rf.currentTerm, DDebug, "-> S%d, Leader Log=%v", peer, rf.log.String())
 			return
 		}
 
@@ -216,7 +178,7 @@ func (rf *Raft) startReplication(term int) bool {
 		rf.nextIndex[peer] = rf.matchIndex[peer] + 1
 
 		majorityMatched := rf.getMajorityIndexLocked()
-		if majorityMatched > rf.commitIndex && rf.log[majorityMatched].Term == rf.currentTerm { // important! can only commit log of current term
+		if majorityMatched > rf.commitIndex && rf.log.at(majorityMatched).Term == rf.currentTerm { // important! can only commit log of current term
 			LOG(rf.me, rf.currentTerm, DApply, "Leader update the commit index %d->%d", rf.commitIndex, majorityMatched)
 			rf.commitIndex = majorityMatched
 			rf.applyCond.Signal()
@@ -231,18 +193,18 @@ func (rf *Raft) startReplication(term int) bool {
 	}
 	for peer := 0; peer < len(rf.peers); peer++ {
 		if peer == rf.me {
-			rf.matchIndex[peer] = len(rf.log) - 1
-			rf.nextIndex[peer] = len(rf.log)
+			rf.matchIndex[peer] = rf.log.size() - 1
+			rf.nextIndex[peer] = rf.log.size()
 			continue
 		}
 		prevIdx := rf.nextIndex[peer] - 1
-		prevTerm := rf.log[prevIdx].Term
+		prevTerm := rf.log.at(prevIdx).Term
 		args := &AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.votedFor,
 			PrevLogIndex: prevIdx,
 			PrevLogTerm:  prevTerm,
-			Entries:      rf.log[prevIdx+1:],
+			Entries:      rf.log.tail(prevIdx),
 			LeaderCommit: rf.commitIndex,
 		}
 		LOG(rf.me, rf.currentTerm, DDebug, "-> S%d, Send log, Args:%s", peer, args.String())

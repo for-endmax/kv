@@ -81,7 +81,7 @@ type Raft struct {
 	currentTerm int
 	votedFor    int // -1 means vote for none
 
-	log        []LogEntry
+	log        *RaftLog
 	nextIndex  []int
 	matchIndex []int
 
@@ -138,7 +138,7 @@ func (rf *Raft) becomeLeaderLocked() {
 
 	// initial next/match index for this term
 	for peer := 0; peer < len(rf.peers); peer++ {
-		rf.nextIndex[peer] = len(rf.log)
+		rf.nextIndex[peer] = rf.log.size()
 		rf.matchIndex[peer] = 0
 	}
 }
@@ -163,7 +163,11 @@ func (rf *Raft) GetState() (int, bool) {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (PartD).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.log.doSnapshot(index, snapshot)
 
+	rf.persistLocked()
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -185,15 +189,15 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.role != Leader {
 		return 0, 0, false
 	}
-	rf.log = append(rf.log, LogEntry{
+	rf.log.append(LogEntry{
 		CommandValid: true,
 		Command:      command,
 		Term:         rf.currentTerm,
 	})
 	rf.persistLocked()
-	LOG(rf.me, rf.currentTerm, DLeader, "Leader accept log [%d]T%d", len(rf.log)-1, rf.currentTerm)
+	LOG(rf.me, rf.currentTerm, DLeader, "Leader accept log [%d]T%d", rf.log.size()-1, rf.currentTerm)
 
-	return len(rf.log) - 1, rf.currentTerm, true
+	return rf.log.size() - 1, rf.currentTerm, true
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -240,7 +244,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 1
 	rf.votedFor = -1
 
-	rf.log = append(rf.log, LogEntry{Term: InvalidTerm})
+	rf.log = NewLog(InvalidIndex, InvalidTerm, nil, nil)
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 
