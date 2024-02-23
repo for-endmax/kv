@@ -119,19 +119,6 @@ func (rl *RaftLog) String() string {
 	return terms
 }
 
-func (rl *RaftLog) doSnapshot(index int, snapshot []byte) {
-	idx := rl.idx(index)
-
-	rl.snapLastIdx = index
-	rl.snapLastTerm = rl.tailLog[idx].Term
-	rl.snapshot = snapshot
-
-	newLog := make([]LogEntry, 0, rl.size()-rl.snapLastIdx)
-	newLog = append(newLog, LogEntry{Term: rl.snapLastTerm})
-	newLog = append(newLog, rl.tailLog[idx+1:]...)
-	rl.tailLog = newLog
-}
-
 func (rl *RaftLog) append(e LogEntry) {
 	rl.tailLog = append(rl.tailLog, e)
 }

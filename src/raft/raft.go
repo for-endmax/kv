@@ -48,6 +48,7 @@ type Raft struct {
 	// fields for applying loop
 	applyCh     chan ApplyMsg
 	applyCond   *sync.Cond
+	snapPending bool
 	commitIndex int
 	lastApplied int
 
@@ -159,6 +160,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//initialize the fields used for apply
 	rf.applyCh = applyCh
 	rf.applyCond = sync.NewCond(&rf.mu)
+	rf.snapPending = false
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

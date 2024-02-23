@@ -90,7 +90,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	// match success,append the leader logs to local
+	// match success, append the leader logs to local
 	rf.log.appendFrom(args.PrevLogIndex, args.Entries)
 	rf.persistLocked()
 	LOG(rf.me, rf.currentTerm, DLog2, "Follower append logs: (%d, %d]", args.PrevLogIndex, args.PrevLogIndex+len(args.Entries))
@@ -205,6 +205,18 @@ func (rf *Raft) startReplication(term int) bool {
 			continue
 		}
 		prevIdx := rf.nextIndex[peer] - 1
+		// snapshot
+		if prevIdx < rf.log.snapLastIdx {
+			args := &InstallSnapshotArgs{
+				Term:              rf.currentTerm,
+				LeaderId:          rf.me,
+				LastIncludedIndex: rf.log.snapLastIdx,
+				LastIncludedTerm:  rf.log.snapLastTerm,
+				Snapshot:          rf.log.snapshot,
+			}
+			LOG(rf.me, rf.currentTerm, DDebug, "-> S%d, Send Snapshot, Args:%s", peer, args.String())
+			go rf.installToPeer(peer, term, args)
+		}
 		prevTerm := rf.log.at(prevIdx).Term
 		args := &AppendEntriesArgs{
 			Term:         rf.currentTerm,
