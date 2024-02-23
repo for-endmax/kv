@@ -225,12 +225,15 @@ func (rf *Raft) startReplication(term int) bool {
 			continue
 		}
 		prevTerm := rf.log.at(prevIdx).Term
+		tmpLog := rf.log.tail(prevIdx)
+		tailLog := make([]LogEntry, len(tmpLog))
+		copy(tailLog, tmpLog)
 		args := &AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.votedFor,
 			PrevLogIndex: prevIdx,
 			PrevLogTerm:  prevTerm,
-			Entries:      rf.log.tail(prevIdx),
+			Entries:      tailLog,
 			LeaderCommit: rf.commitIndex,
 		}
 		LOG(rf.me, rf.currentTerm, DDebug, "-> S%d, Send log, Args:%s", peer, args.String())
