@@ -1,16 +1,14 @@
 package kvraft
 
-import (
-	"course/labrpc"
-)
+import "course/labrpc"
 import "crypto/rand"
 import "math/big"
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	leaderId int //  record leaderId， avoid polling in the next request
-	// clientId + seqId determine unique command
+	leaderId int // 记录 Leader 节点的 id，避免下一次请求的时候去轮询查找 Leader
+	// clientID+seqId 确定一个唯一的命令
 	clientId int64
 	seqId    int64
 }
@@ -43,20 +41,22 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
-	args := GetArgs{Key: key}
-	var reply GetReply
-
-	// probe the server node
-	for {
-		ok := ck.servers[ck.leaderId].Call("KVServer.Get", &args, &reply)
-		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrTimeout { // not ok or timeout or not Leader node
-			ck.leaderId = (ck.leaderId + 1) % len(ck.servers) // next node index
-		} else {
-			break
-		}
+	// You will have to modify this function.
+	args := GetArgs{
+		Key: key,
 	}
 
-	return reply.Value
+	for {
+		var reply GetReply
+		ok := ck.servers[ck.leaderId].Call("KVServer.Get", &args, &reply)
+		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrTimeout {
+			// 请求失败，选择另一个节点重试
+			ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+			continue
+		}
+		// 调用成功，返回 value
+		return reply.Value
+	}
 }
 
 // PutAppend shared by Put and Append.
@@ -76,19 +76,19 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		ClientId: ck.clientId,
 		SeqId:    ck.seqId,
 	}
-	var reply PutAppendReply
 
-	// probe the server node
 	for {
+		var reply PutAppendReply
 		ok := ck.servers[ck.leaderId].Call("KVServer.PutAppend", &args, &reply)
-		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrTimeout { // not ok or timeout or not Leader node
-			ck.leaderId = (ck.leaderId + 1) % len(ck.servers) // next node index
-		} else { // success
-			break
+		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrTimeout {
+			// 请求失败，选择另一个节点重试
+			ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
+			continue
 		}
+		// 调用成功，返回
+		ck.seqId++
+		return
 	}
-	ck.seqId++
-	return
 }
 
 func (ck *Clerk) Put(key string, value string) {

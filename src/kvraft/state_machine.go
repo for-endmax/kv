@@ -4,8 +4,10 @@ type MemoryKVStateMachine struct {
 	KV map[string]string
 }
 
-func NewMachine() *MemoryKVStateMachine {
-	return &MemoryKVStateMachine{KV: make(map[string]string)}
+func NewMemoryKVStateMachine() *MemoryKVStateMachine {
+	return &MemoryKVStateMachine{
+		KV: make(map[string]string),
+	}
 }
 
 func (mkv *MemoryKVStateMachine) Get(key string) (string, Err) {

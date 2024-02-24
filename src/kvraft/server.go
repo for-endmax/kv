@@ -5,29 +5,19 @@ import (
 	"course/labgob"
 	"course/labrpc"
 	"course/raft"
-	"fmt"
-	"log"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-const Debug = false
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug {
-		log.Printf(format, a...)
-	}
-	return
-}
-
 type KVServer struct {
-	mu           sync.Mutex
-	me           int
-	rf           *raft.Raft
-	applyCh      chan raft.ApplyMsg
-	dead         int32 // set by Kill()
-	maxraftstate int   // snapshot if log grows this big
+	mu      sync.Mutex
+	me      int
+	rf      *raft.Raft
+	applyCh chan raft.ApplyMsg
+	dead    int32 // set by Kill()
+
+	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
 	lastApplied    int
@@ -38,13 +28,16 @@ type KVServer struct {
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	// 调用 raft，将请求存储到 raft 日志中并进行同步
 	index, _, isLeader := kv.rf.Start(Op{Key: args.Key, OpType: OpGet})
+
+	// 如果不是 Leader 的话，直接返回错误
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
 
-	// wait for result
+	// 等待结果
 	kv.mu.Lock()
 	notifyCh := kv.getNotifyChannel(index)
 	kv.mu.Unlock()
@@ -53,10 +46,10 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	case result := <-notifyCh:
 		reply.Value = result.Value
 		reply.Err = result.Err
-	case <-time.After(ClientRequestTimeOut):
+	case <-time.After(ClientRequestTimeout):
 		reply.Err = ErrTimeout
 	}
-	// async way to delete channel
+
 	go func() {
 		kv.mu.Lock()
 		kv.removeNotifyChannel(index)
@@ -64,17 +57,17 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}()
 }
 
-func (kv *KVServer) isRequestDuplicated(clientId, seqId int64) bool {
+func (kv *KVServer) requestDuplicated(clientId, seqId int64) bool {
 	info, ok := kv.duplicateTable[clientId]
 	return ok && seqId <= info.SeqId
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-
-	// check whether is the same request
+	// 判断请求是否重复
 	kv.mu.Lock()
-	if kv.isRequestDuplicated(args.ClientId, args.SeqId) {
+	if kv.requestDuplicated(args.ClientId, args.SeqId) {
+		// 如果是重复请求，直接返回结果
 		opReply := kv.duplicateTable[args.ClientId].Reply
 		reply.Err = opReply.Err
 		kv.mu.Unlock()
@@ -82,22 +75,22 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	kv.mu.Unlock()
 
-	// append log
-	index, _, isLeader := kv.rf.Start(
-		Op{
-			Key:      args.Key,
-			Value:    args.Value,
-			OpType:   getOperationType(args.Op),
-			ClientId: args.ClientId,
-			SeqId:    args.SeqId,
-		},
-	)
+	// 调用 raft，将请求存储到 raft 日志中并进行同步
+	index, _, isLeader := kv.rf.Start(Op{
+		Key:      args.Key,
+		Value:    args.Value,
+		OpType:   getOperationType(args.Op),
+		ClientId: args.ClientId,
+		SeqId:    args.SeqId,
+	})
+
+	// 如果不是 Leader 的话，直接返回错误
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
 
-	// wait for result(apply)
+	// 等待结果
 	kv.mu.Lock()
 	notifyCh := kv.getNotifyChannel(index)
 	kv.mu.Unlock()
@@ -105,11 +98,11 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	select {
 	case result := <-notifyCh:
 		reply.Err = result.Err
-	case <-time.After(ClientRequestTimeOut):
+	case <-time.After(ClientRequestTimeout):
 		reply.Err = ErrTimeout
 	}
 
-	// async way to delete channel
+	// 删除通知的 channel
 	go func() {
 		kv.mu.Lock()
 		kv.removeNotifyChannel(index)
@@ -136,7 +129,7 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
-// servers[] contains the ports of the set of
+// StartKVServer servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
 // form the fault-tolerant key/value service.
 // me is the index of the current server in servers[].
@@ -163,37 +156,40 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-	kv.lastApplied = 0
 	kv.dead = 0
-	kv.stateMachine = NewMachine()
+	kv.lastApplied = 0
+	kv.stateMachine = NewMemoryKVStateMachine()
 	kv.notifyChans = make(map[int]chan *OpReply)
 	kv.duplicateTable = make(map[int64]LastOperationInfo)
 
-	// restore from snapshot
+	// 从 snapshot 中恢复状态
 	kv.restoreFromSnapshot(persister.ReadSnapshot())
 
 	go kv.applyTask()
 	return kv
 }
 
+// 处理 apply 任务
 func (kv *KVServer) applyTask() {
 	for !kv.killed() {
 		select {
 		case message := <-kv.applyCh:
 			if message.CommandValid {
 				kv.mu.Lock()
-				// check whether applied before
+				// 如果是已经处理过的消息则直接忽略
 				if message.CommandIndex <= kv.lastApplied {
 					kv.mu.Unlock()
 					continue
 				}
-				op := message.Command.(Op)
+				kv.lastApplied = message.CommandIndex
 
-				// if already applied
+				// 取出用户的操作信息
+				op := message.Command.(Op)
 				var opReply *OpReply
-				if op.OpType != OpGet && kv.isRequestDuplicated(op.ClientId, op.SeqId) {
+				if op.OpType != OpGet && kv.requestDuplicated(op.ClientId, op.SeqId) {
 					opReply = kv.duplicateTable[op.ClientId].Reply
 				} else {
+					// 将操作应用状态机中
 					opReply = kv.applyToStateMachine(op)
 					if op.OpType != OpGet {
 						kv.duplicateTable[op.ClientId] = LastOperationInfo{
@@ -203,21 +199,22 @@ func (kv *KVServer) applyTask() {
 					}
 				}
 
-				// return result
+				// 将结果发送回去
 				if _, isLeader := kv.rf.GetState(); isLeader {
 					notifyCh := kv.getNotifyChannel(message.CommandIndex)
 					notifyCh <- opReply
 				}
 
-				// check whether client need snapshot
-				if kv.maxraftstate != -1 && kv.maxraftstate > kv.rf.GetRaftStateSize() {
+				// 判断是否需要 snapshot
+				if kv.maxraftstate != -1 && kv.rf.GetRaftStateSize() >= kv.maxraftstate {
 					kv.makeSnapshot(message.CommandIndex)
 				}
+
 				kv.mu.Unlock()
-			} else if message.SnapshotValid { // snapshot command
+			} else if message.SnapshotValid {
 				kv.mu.Lock()
 				kv.restoreFromSnapshot(message.Snapshot)
-				kv.lastApplied = message.CommandIndex
+				kv.lastApplied = message.SnapshotIndex
 				kv.mu.Unlock()
 			}
 		}
@@ -234,32 +231,26 @@ func (kv *KVServer) applyToStateMachine(op Op) *OpReply {
 		err = kv.stateMachine.Put(op.Key, op.Value)
 	case OpAppend:
 		err = kv.stateMachine.Append(op.Key, op.Value)
-	default:
-		panic(fmt.Sprintf("unknow oPType:%d", op.OpType))
 	}
-	return &OpReply{
-		Value: value,
-		Err:   err,
-	}
+	return &OpReply{Value: value, Err: err}
 }
 
 func (kv *KVServer) getNotifyChannel(index int) chan *OpReply {
 	if _, ok := kv.notifyChans[index]; !ok {
-		kv.notifyChans[index] = make(chan *OpReply)
+		kv.notifyChans[index] = make(chan *OpReply, 1)
 	}
 	return kv.notifyChans[index]
 }
+
 func (kv *KVServer) removeNotifyChannel(index int) {
-	if _, ok := kv.notifyChans[index]; ok {
-		delete(kv.notifyChans, index)
-	}
+	delete(kv.notifyChans, index)
 }
 
 func (kv *KVServer) makeSnapshot(index int) {
 	buf := new(bytes.Buffer)
-	encoder := labgob.NewEncoder(buf)
-	_ = encoder.Encode(kv.stateMachine)
-	_ = encoder.Encode(kv.duplicateTable)
+	enc := labgob.NewEncoder(buf)
+	_ = enc.Encode(kv.stateMachine)
+	_ = enc.Encode(kv.duplicateTable)
 	kv.rf.Snapshot(index, buf.Bytes())
 }
 
@@ -267,18 +258,15 @@ func (kv *KVServer) restoreFromSnapshot(snapshot []byte) {
 	if len(snapshot) == 0 {
 		return
 	}
-	buf := new(bytes.Buffer)
-	decoder := labgob.NewDecoder(buf)
+
+	buf := bytes.NewBuffer(snapshot)
+	dec := labgob.NewDecoder(buf)
 	var stateMachine MemoryKVStateMachine
-	if err := decoder.Decode(&stateMachine); err != nil {
-		panic(fmt.Sprintf("decoder stateMachine error : %s", err.Error()))
-	}
-
 	var dupTable map[int64]LastOperationInfo
-	if err := decoder.Decode(&dupTable); err != nil {
-		panic(fmt.Sprintf("decoder dupTable error : %s", err.Error()))
-
+	if dec.Decode(&stateMachine) != nil || dec.Decode(&dupTable) != nil {
+		panic("failed to restore state from snapshpt")
 	}
+
 	kv.stateMachine = &stateMachine
 	kv.duplicateTable = dupTable
 }

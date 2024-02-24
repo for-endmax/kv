@@ -10,7 +10,7 @@ const (
 	InvalidTerm  = 0
 	InvalidIndex = 0
 
-	replicationInterval time.Duration = 70 * time.Millisecond
+	replicationInterval time.Duration = 30 * time.Millisecond
 )
 
 type LogEntry struct {
