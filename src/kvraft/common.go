@@ -22,6 +22,8 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	ClientId int64
+	SeqId    int64
 }
 
 type PutAppendReply struct {
@@ -47,6 +49,9 @@ type Op struct {
 	Key    string
 	Value  string
 	OpType OperationType
+
+	ClientId int64
+	SeqId    int64
 }
 
 type OperationType uint8
@@ -74,4 +79,9 @@ func getOperationType(v string) OperationType {
 	default:
 		panic(fmt.Sprintf("unknow operation type :%s", v))
 	}
+}
+
+type LastOperationInfo struct {
+	SeqId int64
+	Reply *OpReply
 }

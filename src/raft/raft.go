@@ -183,6 +183,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
+// GetRaftStateSize Get the size of log
+func (rf *Raft) GetRaftStateSize() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.persister.RaftStateSize()
+}
+
 func (rf *Raft) contextLostLocked(role Role, term int) bool {
 	return !(rf.currentTerm == term && rf.role == role)
 }
