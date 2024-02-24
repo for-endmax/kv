@@ -82,6 +82,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Reject Log, Follower log too short, Len:%d <= Prev:%d", args.LeaderId, rf.log.size(), args.PrevLogIndex)
 		return
 	}
+	if args.PrevLogIndex < rf.log.snapLastIdx {
+		args.PrevLogIndex = rf.log.snapLastIdx
+	}
 	if rf.log.at(args.PrevLogIndex).Term != args.PrevLogTerm {
 		reply.ConflictTerm = rf.log.at(args.PrevLogIndex).Term
 		reply.ConflictIndex = rf.log.firstFor(reply.ConflictTerm)
