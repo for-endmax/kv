@@ -4,9 +4,11 @@ import (
 	"course/labgob"
 	"course/labrpc"
 	"course/raft"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const Debug = false
@@ -18,30 +20,80 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
-}
-
 type KVServer struct {
-	mu      sync.Mutex
-	me      int
-	rf      *raft.Raft
-	applyCh chan raft.ApplyMsg
-	dead    int32 // set by Kill()
-
-	maxraftstate int // snapshot if log grows this big
+	mu           sync.Mutex
+	me           int
+	rf           *raft.Raft
+	applyCh      chan raft.ApplyMsg
+	dead         int32 // set by Kill()
+	maxraftstate int   // snapshot if log grows this big
 
 	// Your definitions here.
+	lastApplied  int
+	stateMachine *MemoryKVStateMachine
+	notifyChans  map[int]chan *OpReply
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	index, _, isLeader := kv.rf.Start(Op{Key: args.Key, OpType: OpGet})
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	// wait for result
+	kv.mu.Lock()
+	notifyCh := kv.getNotifyChannel(index)
+	kv.mu.Unlock()
+
+	select {
+	case result := <-notifyCh:
+		reply.Value = result.Value
+		reply.Err = result.Err
+	case <-time.After(ClientRequestTimeOut):
+		reply.Err = ErrTimeout
+	}
+	// async way to delete channel
+	go func() {
+		kv.mu.Lock()
+		kv.removeNotifyChannel(index)
+		kv.mu.Unlock()
+	}()
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	index, _, isLeader := kv.rf.Start(
+		Op{
+			Key:    args.Key,
+			Value:  args.Value,
+			OpType: getOperationType(args.Op),
+		},
+	)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	// wait for result
+	kv.mu.Lock()
+	notifyCh := kv.getNotifyChannel(index)
+	kv.mu.Unlock()
+
+	select {
+	case result := <-notifyCh:
+		reply.Err = result.Err
+	case <-time.After(ClientRequestTimeOut):
+		reply.Err = ErrTimeout
+	}
+
+	// async way to delete channel
+	go func() {
+		kv.mu.Lock()
+		kv.removeNotifyChannel(index)
+		kv.mu.Unlock()
+	}()
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -90,6 +142,66 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-
+	kv.lastApplied = 0
+	kv.dead = 0
+	kv.stateMachine = NewMachine()
+	kv.notifyChans = make(map[int]chan *OpReply)
+	go kv.applyTask()
 	return kv
+}
+
+func (kv *KVServer) applyTask() {
+	for !kv.killed() {
+		select {
+		case message := <-kv.applyCh:
+			if message.CommandValid {
+				kv.mu.Lock()
+				// check whether applied before
+				if message.CommandIndex <= kv.lastApplied {
+					kv.mu.Unlock()
+					continue
+				}
+				op := message.Command.(Op)
+				opReply := kv.applyToStateMachine(op)
+
+				// return result
+				if _, isLeader := kv.rf.GetState(); isLeader {
+					notifyCh := kv.getNotifyChannel(message.CommandIndex)
+					notifyCh <- opReply
+				}
+				kv.mu.Unlock()
+			}
+		}
+	}
+}
+
+func (kv *KVServer) applyToStateMachine(op Op) *OpReply {
+	var value string
+	var err Err
+	switch op.OpType {
+	case OpGet:
+		value, err = kv.stateMachine.Get(op.Key)
+	case OpPut:
+		err = kv.stateMachine.Put(op.Key, op.Value)
+	case OpAppend:
+		err = kv.stateMachine.Append(op.Key, op.Value)
+	default:
+		panic(fmt.Sprintf("unknow oPType:%d", op.OpType))
+	}
+	return &OpReply{
+		Value: value,
+		Err:   err,
+	}
+}
+
+func (kv *KVServer) getNotifyChannel(index int) chan *OpReply {
+	if _, ok := kv.notifyChans[index]; !ok {
+		kv.notifyChans[index] = make(chan *OpReply)
+	}
+	return kv.notifyChans[index]
+}
+func (kv *KVServer) removeNotifyChannel(index int) {
+	if _, ok := kv.notifyChans[index]; ok {
+		delete(kv.notifyChans, index)
+	}
 }
