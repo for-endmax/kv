@@ -1,12 +1,15 @@
 package kvraft
 
-import "course/labrpc"
+import (
+	"course/labrpc"
+)
 import "crypto/rand"
 import "math/big"
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	leaderId int //  record leaderId， avoid polling in the next request
 }
 
 func nrand() int64 {
@@ -20,10 +23,11 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.leaderId = 0
 	return ck
 }
 
-// fetch the current value for a key.
+// Get fetch the current value for a key.
 // returns "" if the key does not exist.
 // keeps trying forever in the face of all other errors.
 //
@@ -34,12 +38,23 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
+	args := GetArgs{Key: key}
+	var reply GetReply
 
-	// You will have to modify this function.
-	return ""
+	// probe the server node
+	for {
+		ok := ck.servers[ck.leaderId].Call("KVServer.Get", &args, &reply)
+		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrTimeout { // not ok or timeout or not Leader node
+			ck.leaderId = (ck.leaderId + 1) % len(ck.servers) // next node index
+		} else {
+			break
+		}
+	}
+
+	return reply.Value
 }
 
-// shared by Put and Append.
+// PutAppend shared by Put and Append.
 //
 // you can send an RPC with code like this:
 // ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
@@ -49,6 +64,19 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	args := PutAppendArgs{Key: key, Value: value, Op: op}
+	var reply PutAppendReply
+
+	// probe the server node
+	for {
+		ok := ck.servers[ck.leaderId].Call("KVServer.PutAppend", &args, &reply)
+		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrTimeout { // not ok or timeout or not Leader node
+			ck.leaderId = (ck.leaderId + 1) % len(ck.servers) // next node index
+		} else { // success
+			break
+		}
+	}
+	return
 }
 
 func (ck *Clerk) Put(key string, value string) {
