@@ -6,11 +6,6 @@ import (
 	"time"
 )
 
-const (
-	electionTimeoutMin time.Duration = 250 * time.Millisecond
-	electionTimeoutMax time.Duration = 400 * time.Millisecond
-)
-
 func (rf *Raft) resetElectionTimerLocked() {
 	rf.electionStart = time.Now()
 	randRange := int64(electionTimeoutMax - electionTimeoutMin)
@@ -21,11 +16,11 @@ func (rf *Raft) isElectionTimeoutLocked() bool {
 	return time.Since(rf.electionStart) > rf.electionTimeout
 }
 
-// check whether my last log is more up-to-date than candidate's last log
+// check whether my last log is more up to date than the candidate's last log
 func (rf *Raft) isMoreUpToDateLocked(candidateIndex, candidateTerm int) bool {
 	lastIndex, lastTerm := rf.log.last()
-	LOG(rf.me, rf.currentTerm, DVote, "Compare last log, Me: [%d]T%d, Candidate: [%d]T%d", lastIndex, lastTerm, candidateIndex, candidateTerm)
 
+	LOG(rf.me, rf.currentTerm, DVote, "Compare last log, Me: [%d]T%d, Candidate: [%d]T%d", lastIndex, lastTerm, candidateIndex, candidateTerm)
 	if lastTerm != candidateTerm {
 		return lastTerm > candidateTerm
 	}
@@ -44,34 +39,34 @@ type RequestVoteArgs struct {
 }
 
 func (args *RequestVoteArgs) String() string {
-	return fmt.Sprintf("Candidate-%d, T%d, Last=[%d]T%d", args.CandidateId, args.Term, args.LastLogIndex, args.LastLogTerm)
+	return fmt.Sprintf("Candidate-%d, T%d, Last: [%d]T%d", args.CandidateId, args.Term, args.LastLogIndex, args.LastLogTerm)
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (PartA).
-	Term         int
-	VotedGranted bool
+	Term        int
+	VoteGranted bool
 }
 
 func (reply *RequestVoteReply) String() string {
-	return fmt.Sprintf("T%d, VoteGranted=%v", reply.Term, reply.VotedGranted)
+	return fmt.Sprintf("T%d, VoteGranted: %v", reply.Term, reply.VoteGranted)
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (PartA, PartB).
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	LOG(rf.me, rf.currentTerm, DDebug, "<- S%d, VotedAsked Args=%v", args.CandidateId, args.String())
+	LOG(rf.me, rf.currentTerm, DDebug, "<- S%d, VoteAsked, Args=%v", args.CandidateId, args.String())
 
 	reply.Term = rf.currentTerm
-	reply.VotedGranted = false
-
-	// align terms
+	reply.VoteGranted = false
+	// align the term
 	if args.Term < rf.currentTerm {
-		LOG(rf.me, rf.currentTerm, DVote, "->S%d, Reject vote, higher term, T%d > T%d", args.CandidateId, rf.currentTerm, args.Term)
+		LOG(rf.me, rf.currentTerm, DVote, "<- S%d, Reject voted, Higher term, T%d>T%d", args.CandidateId, rf.currentTerm, args.Term)
 		return
 	}
 	if args.Term > rf.currentTerm {
@@ -80,21 +75,21 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// check for votedFor
 	if rf.votedFor != -1 {
-		LOG(rf.me, rf.currentTerm, DVote, "-> S%d, Reject vote, Already voted to S%d", args.CandidateId, rf.votedFor)
+		LOG(rf.me, rf.currentTerm, DVote, "<- S%d, Reject voted, Already voted to S%d", args.CandidateId, rf.votedFor)
 		return
 	}
 
-	// check log
+	// check if candidate's last log is more up to date
 	if rf.isMoreUpToDateLocked(args.LastLogIndex, args.LastLogTerm) {
-		LOG(rf.me, rf.currentTerm, DVote, "-> S%d, Reject Vote, S%d's log less up-to-date", args.CandidateId, args.CandidateId)
+		LOG(rf.me, rf.currentTerm, DVote, "<- S%d, Reject voted, Candidate less up-to-date", args.CandidateId)
 		return
 	}
 
-	reply.VotedGranted = true
+	reply.VoteGranted = true
 	rf.votedFor = args.CandidateId
 	rf.persistLocked()
 	rf.resetElectionTimerLocked()
-	LOG(rf.me, rf.currentTerm, DVote, "-> S%d, Vote granted", args.CandidateId)
+	LOG(rf.me, rf.currentTerm, DVote, "<- S%d, Vote granted", args.CandidateId)
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -135,16 +130,16 @@ func (rf *Raft) startElection(term int) {
 		reply := &RequestVoteReply{}
 		ok := rf.sendRequestVote(peer, args, reply)
 
-		// handle the response
+		// handle the reponse
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 		if !ok {
-			LOG(rf.me, rf.currentTerm, DDebug, "Ask vote from S%d, Lost or error", peer)
+			LOG(rf.me, rf.currentTerm, DDebug, "-> S%d, Ask vote, Lost or error", peer)
 			return
 		}
 		LOG(rf.me, rf.currentTerm, DDebug, "-> S%d, AskVote Reply=%v", peer, reply.String())
 
-		// align terms
+		// align term
 		if reply.Term > rf.currentTerm {
 			rf.becomeFollowerLocked(reply.Term)
 			return
@@ -152,10 +147,12 @@ func (rf *Raft) startElection(term int) {
 
 		// check the context
 		if rf.contextLostLocked(Candidate, term) {
-			LOG(rf.me, rf.currentTerm, DVote, "Lost context, abort RequestVoteReply for S%d", peer)
+			LOG(rf.me, rf.currentTerm, DVote, "-> S%d, Lost context, abort RequestVoteReply", peer)
 			return
 		}
-		if reply.VotedGranted {
+
+		// count the votes
+		if reply.VoteGranted {
 			votes++
 			if votes > len(rf.peers)/2 {
 				rf.becomeLeaderLocked()
@@ -163,31 +160,35 @@ func (rf *Raft) startElection(term int) {
 			}
 		}
 	}
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.contextLostLocked(Candidate, term) {
-		LOG(rf.me, rf.currentTerm, DVote, "Lost Candidate to %s, abort RequestVote", rf.role)
+		LOG(rf.me, rf.currentTerm, DVote, "Lost Candidate[T%d] to %s[T%d], abort RequestVote", rf.role, term, rf.currentTerm)
 		return
 	}
+
 	lastIdx, lastTerm := rf.log.last()
 	for peer := 0; peer < len(rf.peers); peer++ {
 		if peer == rf.me {
 			votes++
 			continue
 		}
+
 		args := &RequestVoteArgs{
 			Term:         rf.currentTerm,
 			CandidateId:  rf.me,
 			LastLogIndex: lastIdx,
 			LastLogTerm:  lastTerm,
 		}
-		LOG(rf.me, rf.currentTerm, DDebug, "-> S%d, AskVote Args=%v", peer, args.String())
+		LOG(rf.me, rf.currentTerm, DDebug, "-> S%d, AskVote, Args=%v", peer, args.String())
+
 		go askVoteFromPeer(peer, args)
 	}
 }
 
 func (rf *Raft) electionTicker() {
-	for rf.killed() == false {
+	for !rf.killed() {
 
 		// Your code here (PartA)
 		// Check if a leader election should be started.
@@ -197,6 +198,7 @@ func (rf *Raft) electionTicker() {
 			go rf.startElection(rf.currentTerm)
 		}
 		rf.mu.Unlock()
+
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 		ms := 50 + (rand.Int63() % 300)

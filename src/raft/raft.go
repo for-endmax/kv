@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	//	"bytes"
+
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,6 +27,47 @@ import (
 	//	"course/labgob"
 	"course/labrpc"
 )
+
+const (
+	electionTimeoutMin time.Duration = 250 * time.Millisecond
+	electionTimeoutMax time.Duration = 400 * time.Millisecond
+
+	replicateInterval time.Duration = 30 * time.Millisecond
+)
+
+const (
+	InvalidTerm  int = 0
+	InvalidIndex int = 0
+)
+
+type Role string
+
+const (
+	Follower  Role = "Follower"
+	Candidate Role = "Candidate"
+	Leader    Role = "Leader"
+)
+
+// as each Raft peer becomes aware that successive log entries are
+// committed, the peer should send an ApplyMsg to the service (or
+// tester) on the same server, via the applyCh passed to Make(). set
+// CommandValid to true to indicate that the ApplyMsg contains a newly
+// committed log entry.
+//
+// in part PartD you'll want to send other kinds of messages (e.g.,
+// snapshots) on the applyCh, but set CommandValid to false for these
+// other uses.
+type ApplyMsg struct {
+	CommandValid bool
+	Command      interface{}
+	CommandIndex int
+
+	// For PartD:
+	SnapshotValid bool
+	Snapshot      []byte
+	SnapshotTerm  int
+	SnapshotIndex int
+}
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
@@ -41,55 +84,77 @@ type Raft struct {
 	currentTerm int
 	votedFor    int // -1 means vote for none
 
-	log        *RaftLog
+	// log in the Peer's local
+	log *RaftLog
+
+	// only used in Leader
+	// every peer's view
 	nextIndex  []int
 	matchIndex []int
 
-	// fields for applying loop
-	applyCh     chan ApplyMsg
-	applyCond   *sync.Cond
-	snapPending bool
+	// fields for apply loop
 	commitIndex int
 	lastApplied int
+	applyCh     chan ApplyMsg
+	snapPending bool
+	applyCond   *sync.Cond
 
 	electionStart   time.Time
 	electionTimeout time.Duration // random
 }
 
+func (rf *Raft) becomeFollowerLocked(term int) {
+	if term < rf.currentTerm {
+		LOG(rf.me, rf.currentTerm, DError, "Can't become Follower, lower term: T%d", term)
+		return
+	}
+
+	LOG(rf.me, rf.currentTerm, DLog, "%s->Follower, For T%v->T%v", rf.role, rf.currentTerm, term)
+	rf.role = Follower
+	shouldPersit := rf.currentTerm != term
+	if term > rf.currentTerm {
+		rf.votedFor = -1
+	}
+	rf.currentTerm = term
+	if shouldPersit {
+		rf.persistLocked()
+	}
+}
+
+func (rf *Raft) becomeCandidateLocked() {
+	if rf.role == Leader {
+		LOG(rf.me, rf.currentTerm, DError, "Leader can't become Candidate")
+		return
+	}
+
+	LOG(rf.me, rf.currentTerm, DVote, "%s->Candidate, For T%d", rf.role, rf.currentTerm+1)
+	rf.currentTerm++
+	rf.role = Candidate
+	rf.votedFor = rf.me
+	rf.persistLocked()
+}
+
+func (rf *Raft) becomeLeaderLocked() {
+	if rf.role != Candidate {
+		LOG(rf.me, rf.currentTerm, DError, "Only Candidate can become Leader")
+		return
+	}
+
+	LOG(rf.me, rf.currentTerm, DLeader, "Become Leader in T%d", rf.currentTerm)
+	rf.role = Leader
+	for peer := 0; peer < len(rf.peers); peer++ {
+		rf.nextIndex[peer] = rf.log.size()
+		rf.matchIndex[peer] = 0
+	}
+}
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	var term int
-	var isleader bool
 	// Your code here (PartA).
 	rf.mu.Lock()
-	term = rf.currentTerm
-	isleader = rf.role == Leader
-	rf.mu.Unlock()
-	return term, isleader
-}
-
-// the service says it has created a snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (PartD).
-	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	// check index valid
-	if index > rf.commitIndex {
-		LOG(rf.me, rf.currentTerm, DSnap, "Couldn't snapshot before CommitIdx: %d>%d", index, rf.commitIndex)
-		return
-	}
-	if index <= rf.log.snapLastIdx {
-		LOG(rf.me, rf.currentTerm, DSnap, "Already snapshot in %d<=%d", index, rf.log.snapLastIdx)
-		return
-	}
-	rf.log.doSnapshot(index, snapshot)
-
-	rf.persistLocked()
+	return rf.currentTerm, rf.role == Leader
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -116,8 +181,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command:      command,
 		Term:         rf.currentTerm,
 	})
-	rf.persistLocked()
 	LOG(rf.me, rf.currentTerm, DLeader, "Leader accept log [%d]T%d", rf.log.size()-1, rf.currentTerm)
+	rf.persistLocked()
 
 	return rf.log.size() - 1, rf.currentTerm, true
 }
@@ -141,6 +206,10 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+func (rf *Raft) contextLostLocked(role Role, term int) bool {
+	return !(rf.currentTerm == term && rf.role == role)
+}
+
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -162,13 +231,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 1
 	rf.votedFor = -1
 
+	// a dummy entry to aovid lots of corner checks
 	rf.log = NewLog(InvalidIndex, InvalidTerm, nil, nil)
+
+	// initialize the leader's view slice
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 
-	//initialize the fields used for apply
+	// initialize the fields used for apply
 	rf.applyCh = applyCh
 	rf.applyCond = sync.NewCond(&rf.mu)
+	rf.commitIndex = 0
+	rf.lastApplied = 0
 	rf.snapPending = false
 
 	// initialize from state persisted before a crash
@@ -176,20 +250,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.electionTicker()
-
-	// start ticker goroutine to start application
 	go rf.applicationTicker()
 
 	return rf
 }
 
-// GetRaftStateSize Get the size of log
 func (rf *Raft) GetRaftStateSize() int {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	return rf.persister.RaftStateSize()
-}
 
-func (rf *Raft) contextLostLocked(role Role, term int) bool {
-	return !(rf.currentTerm == term && rf.role == role)
+	return rf.persister.RaftStateSize()
 }

@@ -6,32 +6,33 @@ import (
 )
 
 type RaftLog struct {
-	//	contains [1,snapLastIdx]
-	snapshot []byte
-	//	contains (snapLastIdx,snapLastIdx+len(tailLog)-1]
-	// taliLog[0] is a dummy entry
-	tailLog []LogEntry
-
 	snapLastIdx  int
 	snapLastTerm int
+
+	// contains [1, snapLastIdx]
+	snapshot []byte
+
+	// contains index (snapLastIdx, snapLastIdx+len(tailLog)-1] for real data
+	// contains index snapLastIdx for mock log entry
+	tailLog []LogEntry
 }
 
-func NewLog(snapLastIndex int, snapLastTerm int, snapshot []byte, entries []LogEntry) *RaftLog {
+func NewLog(snapLastIdx, snapLastTerm int, snapshot []byte, entries []LogEntry) *RaftLog {
 	rl := &RaftLog{
-		snapshot:     snapshot,
-		snapLastIdx:  snapLastIndex,
+		snapLastIdx:  snapLastIdx,
 		snapLastTerm: snapLastTerm,
+		snapshot:     snapshot,
 	}
+
 	rl.tailLog = append(rl.tailLog, LogEntry{
 		Term: snapLastTerm,
 	})
 	rl.tailLog = append(rl.tailLog, entries...)
+
 	return rl
 }
 
-//	Locked
-
-// return detailed error for the caller to log
+// all the functions below should be called under the protection of rf.mutex
 func (rl *RaftLog) readPersist(d *labgob.LabDecoder) error {
 	var lastIdx int
 	if err := d.Decode(&lastIdx); err != nil {
@@ -60,15 +61,15 @@ func (rl *RaftLog) persist(e *labgob.LabEncoder) {
 	e.Encode(rl.tailLog)
 }
 
-// the dummy log is counted
+// access methods
 func (rl *RaftLog) size() int {
 	return rl.snapLastIdx + len(rl.tailLog)
 }
 
-// access the index `rl.snapLastIdx` is allowed, although it's not exist, actually.
 func (rl *RaftLog) idx(logicIdx int) int {
+	// if the logicIdx fall beyond [snapLastIdx, size()-1]
 	if logicIdx < rl.snapLastIdx || logicIdx >= rl.size() {
-		panic(fmt.Sprintf("%d is out of [%d, %d]", logicIdx, rl.snapLastIdx+1, rl.size()-1))
+		panic(fmt.Sprintf("%d is out of [%d, %d]", logicIdx, rl.snapLastIdx, rl.size()-1))
 	}
 	return logicIdx - rl.snapLastIdx
 }
@@ -77,8 +78,9 @@ func (rl *RaftLog) at(logicIdx int) LogEntry {
 	return rl.tailLog[rl.idx(logicIdx)]
 }
 
-func (rl *RaftLog) last() (index int, term int) {
-	return rl.size() - 1, rl.at(rl.size() - 1).Term
+func (rl *RaftLog) last() (index, term int) {
+	i := len(rl.tailLog) - 1
+	return rl.snapLastIdx + i, rl.tailLog[i].Term
 }
 
 func (rl *RaftLog) firstFor(term int) int {
@@ -92,33 +94,15 @@ func (rl *RaftLog) firstFor(term int) int {
 	return InvalidIndex
 }
 
-func (rl *RaftLog) lastFor(term int) int {
-	lastIndex := InvalidIndex
-	for idx, entry := range rl.tailLog {
-		if entry.Term == term {
-			lastIndex = idx + rl.snapLastIdx
-		} else if entry.Term > term {
-			break
-		}
+func (rl *RaftLog) tail(startIdx int) []LogEntry {
+	if startIdx >= rl.size() {
+		return nil
 	}
-	return lastIndex
+
+	return rl.tailLog[rl.idx(startIdx):]
 }
 
-func (rl *RaftLog) String() string {
-	var terms string
-	prevTerm := rl.snapLastTerm
-	prevStart := 0
-	for i := 0; i < len(rl.tailLog); i++ {
-		if rl.tailLog[i].Term != prevStart {
-			terms += fmt.Sprintf(" [%d,%d]T%d", prevStart+rl.snapLastIdx, rl.snapLastIdx+i-1, prevTerm)
-			prevStart = i
-			prevTerm = rl.tailLog[i].Term
-		}
-	}
-	terms += fmt.Sprintf("[%d,%d]T%d", prevStart+rl.snapLastIdx, rl.snapLastIdx+len(rl.tailLog)-1, prevTerm)
-	return terms
-}
-
+// mutate methods
 func (rl *RaftLog) append(e LogEntry) {
 	rl.tailLog = append(rl.tailLog, e)
 }
@@ -127,9 +111,54 @@ func (rl *RaftLog) appendFrom(logicPrevIndex int, entries []LogEntry) {
 	rl.tailLog = append(rl.tailLog[:rl.idx(logicPrevIndex)+1], entries...)
 }
 
-func (rl *RaftLog) tail(prevIdx int) []LogEntry {
-	if prevIdx+1 >= rl.size() {
-		return nil
+// string methods for debug
+func (rl *RaftLog) String() string {
+	var terms string
+	prevTerm := rl.snapLastTerm
+	prevStart := rl.snapLastIdx
+	for i := 0; i < len(rl.tailLog); i++ {
+		if rl.tailLog[i].Term != prevTerm {
+			terms += fmt.Sprintf(" [%d, %d]T%d", prevStart, rl.snapLastIdx+i-1, prevTerm)
+			prevTerm = rl.tailLog[i].Term
+			prevStart = i
+		}
 	}
-	return rl.tailLog[rl.idx(prevIdx)+1:]
+	terms += fmt.Sprintf("[%d, %d]T%d", prevStart, rl.snapLastIdx+len(rl.tailLog)-1, prevTerm)
+	return terms
+}
+
+// snapshot in the index
+// do checkpoint from the app layer
+func (rl *RaftLog) doSnapshot(index int, snapshot []byte) {
+	if index <= rl.snapLastIdx {
+		return
+	}
+
+	idx := rl.idx(index)
+
+	rl.snapLastIdx = index
+	rl.snapLastTerm = rl.tailLog[idx].Term
+	rl.snapshot = snapshot
+
+	// make a new log array
+	newLog := make([]LogEntry, 0, rl.size()-rl.snapLastIdx)
+	newLog = append(newLog, LogEntry{
+		Term: rl.snapLastTerm,
+	})
+	newLog = append(newLog, rl.tailLog[idx+1:]...)
+	rl.tailLog = newLog
+}
+
+// install snapshot from the raft layer
+func (rl *RaftLog) installSnapshot(index, term int, snapshot []byte) {
+	rl.snapLastIdx = index
+	rl.snapLastTerm = term
+	rl.snapshot = snapshot
+
+	// make a new log array
+	newLog := make([]LogEntry, 0, 1)
+	newLog = append(newLog, LogEntry{
+		Term: rl.snapLastTerm,
+	})
+	rl.tailLog = newLog
 }
