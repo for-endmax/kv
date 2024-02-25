@@ -233,14 +233,34 @@ func (rf *Raft) startReplication(term int) bool {
 	return true
 }
 
-// could only replcate in the given term
+// could only replicate in the given term
 func (rf *Raft) replicationTicker(term int) {
 	for !rf.killed() {
-		ok := rf.startReplication(term)
-		if !ok {
+		br := false
+		select {
+		case <-rf.replicationCh:
+			time.Sleep(replicateInterval / 3)
+			ok := rf.startReplication(term)
+			if !ok {
+				br = true
+				break
+			}
+		case <-time.After(replicateInterval):
+			ok := rf.startReplication(term)
+			if !ok {
+				br = true
+				break
+			}
+		}
+		if br {
 			break
 		}
 
-		time.Sleep(replicateInterval)
+		//
+		//ok := rf.startReplication(term)
+		//if !ok {
+		//	break
+		//}
+		//time.Sleep(replicateInterval)
 	}
 }

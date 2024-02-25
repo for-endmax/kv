@@ -32,7 +32,7 @@ const (
 	electionTimeoutMin time.Duration = 250 * time.Millisecond
 	electionTimeoutMax time.Duration = 400 * time.Millisecond
 
-	replicateInterval time.Duration = 30 * time.Millisecond
+	replicateInterval time.Duration = 75 * time.Millisecond
 )
 
 const (
@@ -101,6 +101,7 @@ type Raft struct {
 
 	electionStart   time.Time
 	electionTimeout time.Duration // random
+	replicationCh   chan struct{}
 }
 
 func (rf *Raft) becomeFollowerLocked(term int) {
@@ -171,9 +172,10 @@ func (rf *Raft) GetState() (int, bool) {
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	//defer rf.mu.Unlock()
 
 	if rf.role != Leader {
+		rf.mu.Unlock()
 		return 0, 0, false
 	}
 	rf.log.append(LogEntry{
@@ -184,7 +186,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	LOG(rf.me, rf.currentTerm, DLeader, "Leader accept log [%d]T%d", rf.log.size()-1, rf.currentTerm)
 	rf.persistLocked()
 
-	return rf.log.size() - 1, rf.currentTerm, true
+	index := rf.log.size() - 1
+	term := rf.currentTerm
+	rf.mu.Unlock()
+	rf.replicationCh <- struct{}{}
+	//return rf.log.size() - 1, rf.currentTerm, true
+	return index, term, true
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -244,7 +251,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.snapPending = false
-
+	rf.replicationCh = make(chan struct{}, 100)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 

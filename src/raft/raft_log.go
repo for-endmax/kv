@@ -98,8 +98,9 @@ func (rl *RaftLog) tail(startIdx int) []LogEntry {
 	if startIdx >= rl.size() {
 		return nil
 	}
-
-	return rl.tailLog[rl.idx(startIdx):]
+	tailLog := make([]LogEntry, len(rl.tailLog[rl.idx(startIdx):]))
+	copy(tailLog, rl.tailLog[rl.idx(startIdx):])
+	return tailLog
 }
 
 // mutate methods
